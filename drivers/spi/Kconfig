@@ -529,6 +529,14 @@ config SPI_SPRD_ADI
 	  SoCs, which is based on SPI and used for communication with the
 	  PMIC.
 
+config CMD_SPRD_PMICWDT
+	bool "pmicwdt command to show and stop the SC27xx PMIC watchdog"
+	depends on SPI_SPRD_ADI
+	help
+	  Adds "pmicwdt [stop]", which prints the PMIC watchdog registers and
+	  the last reset reason, and can disarm a watchdog that nothing in the
+	  OS feeds.
+
 config SPI_SUNXI
 	bool "Allwinner SoC SPI controllers"
 	default ARCH_SUNXI

@@ -5,6 +5,7 @@
  */
 
 #include <asm/io.h>
+#include <command.h>
 #include <dm.h>
 #include <dm/device_compat.h>
 #include <hwspinlock.h>
@@ -483,3 +484,98 @@ U_BOOT_DRIVER(spi_sprd_adi) = {
 	.priv_auto	= sizeof(struct sprd_adi),
 	.probe		= sprd_adi_probe,
 };
+
+#ifdef CONFIG_CMD_SPRD_PMICWDT
+/*
+ * pmicwdt [stop]: show the SC27xx PMIC watchdog registers and the last reset
+ * reason, and with "stop" disarm any PMIC watchdog block whose counter or
+ * reset output is enabled.
+ *
+ * Mainline Linux has no driver for this block and does not know that the
+ * bootloader or the power-management coprocessor armed it, so nothing feeds it
+ * and the board is reset after a fixed time. Two blocks are examined: the one
+ * the stock device tree declares (watchdog@40) and the one the ADI restart
+ * code uses (0x80).
+ */
+#define PMICWDT_CNT_LOW		0x18
+#define PMICWDT_CNT_HIGH	0x1c
+#define PMICWDT_CTRL_ARMED	(BIT_WDG_RUN | BIT_WDG_RST)
+
+static int pmicwdt_rd(struct sprd_adi *sadi, u32 reg, u32 *val)
+{
+	if (sprd_adi_read(sadi, reg, val)) {
+		*val = 0xdead;
+		return -EIO;
+	}
+	return 0;
+}
+
+static void pmicwdt_show(struct sprd_adi *sadi, u32 base, const char *tag)
+{
+	u32 lo, hi, ctrl, cl, ch;
+
+	pmicwdt_rd(sadi, base + REG_WDG_LOAD_LOW, &lo);
+	pmicwdt_rd(sadi, base + REG_WDG_LOAD_HIGH, &hi);
+	pmicwdt_rd(sadi, base + REG_WDG_CTRL, &ctrl);
+	pmicwdt_rd(sadi, base + PMICWDT_CNT_LOW, &cl);
+	pmicwdt_rd(sadi, base + PMICWDT_CNT_HIGH, &ch);
+	printf("pmicwdt %s @0x%02x: load=%04x%04x ctrl=%04x cnt=%04x%04x\n",
+	       tag, base, hi, lo, ctrl, ch, cl);
+}
+
+static int pmicwdt_stop(struct sprd_adi *sadi, u32 base)
+{
+	u32 ctrl;
+
+	if (pmicwdt_rd(sadi, base + REG_WDG_CTRL, &ctrl))
+		return -EIO;
+	if (!(ctrl & PMICWDT_CTRL_ARMED))
+		return 0;
+	sprd_adi_write(sadi, base + REG_WDG_LOCK, WDG_UNLOCK_KEY);
+	sprd_adi_write(sadi, base + REG_WDG_CTRL, ctrl & ~PMICWDT_CTRL_ARMED);
+	sprd_adi_write(sadi, base + REG_WDG_LOCK, ~WDG_UNLOCK_KEY);
+	return 1;
+}
+
+static int do_pmicwdt(struct cmd_tbl *cmdtp, int flag, int argc,
+		      char *const argv[])
+{
+	static const u32 bases[] = { 0x40, PMIC_WDG_BASE };
+	struct sprd_adi *sadi;
+	struct udevice *dev;
+	u32 v;
+	int i, ret;
+
+	ret = uclass_get_device_by_driver(UCLASS_SPI,
+					  DM_DRIVER_GET(spi_sprd_adi), &dev);
+	if (ret) {
+		printf("pmicwdt: no ADI device (%d)\n", ret);
+		return CMD_RET_FAILURE;
+	}
+	sadi = dev_get_priv(dev);
+
+	pmicwdt_rd(sadi, PMIC_RST_STATUS, &v);
+	printf("pmicwdt: last reset status 0x%04x\n", v);
+	pmicwdt_rd(sadi, PMIC_MODULE_EN, &v);
+	printf("pmicwdt: module_en 0x%04x\n", v);
+	pmicwdt_rd(sadi, PMIC_CLK_EN, &v);
+	printf("pmicwdt: clk_en 0x%04x\n", v);
+
+	for (i = 0; i < ARRAY_SIZE(bases); i++)
+		pmicwdt_show(sadi, bases[i], "before");
+
+	if (argc > 1 && !strcmp(argv[1], "stop")) {
+		for (i = 0; i < ARRAY_SIZE(bases); i++) {
+			ret = pmicwdt_stop(sadi, bases[i]);
+			printf("pmicwdt: stop @0x%02x -> %d\n", bases[i], ret);
+		}
+		for (i = 0; i < ARRAY_SIZE(bases); i++)
+			pmicwdt_show(sadi, bases[i], "after ");
+	}
+	return CMD_RET_SUCCESS;
+}
+
+U_BOOT_CMD(pmicwdt, 2, 0, do_pmicwdt,
+	   "show / stop the SC27xx PMIC watchdog",
+	   "[stop] - print the PMIC watchdog registers; 'stop' disarms an armed one");
+#endif
