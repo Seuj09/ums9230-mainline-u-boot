@@ -578,4 +578,73 @@ static int do_pmicwdt(struct cmd_tbl *cmdtp, int flag, int argc,
 U_BOOT_CMD(pmicwdt, 2, 0, do_pmicwdt,
 	   "show / stop the SC27xx PMIC watchdog",
 	   "[stop] - print the PMIC watchdog registers; 'stop' disarms an armed one");
+
+/*
+ * pmicsd [on|show]: power the microSD slot's two SC2730 supplies.
+ *
+ * U-Boot has no PMIC or regulator driver, and in the stock system both LDOs
+ * are off while no card is in use, so unless an earlier stage left them on the
+ * slot is unpowered when the mmc bootdev scans it. This does what the kernel's
+ * sc2730-regulator driver does for "vddsdcore" and "vddsdio": unlock the
+ * regulator registers, program 3.3 V (1.2 V + 10 mV * 210; the card starts in
+ * 3.3 V signalling) and clear the power-down bit. A rail that is already
+ * enabled is left alone. The kernel takes over from there.
+ */
+#define SC2730_REG_BASE		0x1800
+#define SC2730_PWR_WR_PROT	(SC2730_REG_BASE + 0x3d0)
+#define SC2730_WR_UNLOCK	0x6e7f
+#define SC2730_SD_VOL_3V3	210
+#define SC2730_LDO_PD_BIT	BIT(0)
+
+static const struct {
+	const char *name;
+	u32 pd;
+	u32 vol;
+} sd_rails[] = {
+	{ "vddsdcore", SC2730_REG_BASE + 0x1ac, SC2730_REG_BASE + 0x1b0 },
+	{ "vddsdio", SC2730_REG_BASE + 0x1b8, SC2730_REG_BASE + 0x1bc },
+};
+
+static int do_pmicsd(struct cmd_tbl *cmdtp, int flag, int argc,
+		     char *const argv[])
+{
+	struct sprd_adi *sadi;
+	struct udevice *dev;
+	bool on = argc > 1 && !strcmp(argv[1], "on");
+	u32 pd, vol;
+	int i, ret;
+
+	ret = uclass_get_device_by_driver(UCLASS_SPI,
+					  DM_DRIVER_GET(spi_sprd_adi), &dev);
+	if (ret) {
+		printf("pmicsd: no ADI device (%d)\n", ret);
+		return CMD_RET_FAILURE;
+	}
+	sadi = dev_get_priv(dev);
+
+	for (i = 0; i < ARRAY_SIZE(sd_rails); i++) {
+		if (sprd_adi_read(sadi, sd_rails[i].pd, &pd) ||
+		    sprd_adi_read(sadi, sd_rails[i].vol, &vol)) {
+			printf("pmicsd: %s: read failed\n", sd_rails[i].name);
+			return CMD_RET_FAILURE;
+		}
+		printf("pmicsd: %s %s, vol sel %u (%u mV)\n", sd_rails[i].name,
+		       (pd & SC2730_LDO_PD_BIT) ? "off" : "on", vol & 0xff,
+		       1200 + 10 * (vol & 0xff));
+		if (!on || !(pd & SC2730_LDO_PD_BIT))
+			continue;
+		sprd_adi_write(sadi, SC2730_PWR_WR_PROT, SC2730_WR_UNLOCK);
+		sprd_adi_write(sadi, sd_rails[i].vol,
+			       (vol & ~0xffU) | SC2730_SD_VOL_3V3);
+		sprd_adi_write(sadi, sd_rails[i].pd, pd & ~SC2730_LDO_PD_BIT);
+		sprd_adi_read(sadi, sd_rails[i].pd, &pd);
+		printf("pmicsd: %s now %s\n", sd_rails[i].name,
+		       (pd & SC2730_LDO_PD_BIT) ? "off" : "on");
+	}
+	return CMD_RET_SUCCESS;
+}
+
+U_BOOT_CMD(pmicsd, 2, 0, do_pmicsd,
+	   "show / enable the microSD slot's PMIC supplies",
+	   "[on] - print vddsdcore/vddsdio; 'on' enables a disabled one at 3.3 V");
 #endif
