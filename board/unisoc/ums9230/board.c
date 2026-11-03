@@ -25,5 +25,14 @@ int ft_board_setup(void *blob, struct bd_info *bd)
 	do_fixup_by_compat(blob, "sprd,bluetooth-sipc",
 			   "local-bd-address", mac, ETH_ALEN, 1);
 
+	/*
+	 * The UFS controller is only described as usable on units whose internal
+	 * storage U-Boot found on it (ufs_present, set by the preboot script). On
+	 * an eMMC unit the kernel never touches the controller.
+	 */
+	do_fixup_by_compat(blob, "sprd,ums9230-ufs", "status",
+			   env_get("ufs_present") ? "okay" : "disabled",
+			   env_get("ufs_present") ? 5 : 9, 1);
+
 	return 0;
 }
